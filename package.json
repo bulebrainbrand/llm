@@ -1,0 +1,9 @@
+{
+	"devDependencies": {
+		"@types/node": "^26.2.0"
+	},
+	"dependencies": {
+		"@bloxdjs/api": "^0.0.7",
+		"@bloxdjs/build": "^0.0.12"
+	}
+}
