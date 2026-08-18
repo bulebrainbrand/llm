@@ -73,6 +73,47 @@ def chunk_string(s: str, chunk_size: int):
     return [s[i:i + chunk_size] for i in range(0, len(s), chunk_size)]
 
 
+def find_tensor(tensors: list, name: str) -> dict:
+    for t in tensors:
+        if t["name"] == name:
+            return t
+    keyword = name.split(".")[-1]
+    similar = [t["name"] for t in tensors if keyword in t["name"]][:5]
+    hint = f" (似た名前: {similar})" if similar else ""
+    raise KeyError(f"テンソルが見つかりません: {name!r}{hint}")
+
+
+def build_structured_weights(manifest_tensors: list, num_layers: int) -> dict:
+    """フラットな manifest_tensors を TypeScript側の ModelWeights と
+    そのままキー名が一致する形(camelCase)に組み立てる。
+    こうしておけば Bloxd 側では文字列マッチングのbuildModelWeights()を
+    呼ばず、manifest.modelWeights をそのまま ModelWeights として使える。
+    """
+    embed_tokens = find_tensor(manifest_tensors, "model.embed_tokens.weight")
+    final_norm = find_tensor(manifest_tensors, "model.norm.weight")
+
+    layers = []
+    for i in range(num_layers):
+        p = f"model.layers.{i}."
+        layers.append({
+            "inputNorm": find_tensor(manifest_tensors, p + "input_layernorm.weight"),
+            "postAttnNorm": find_tensor(manifest_tensors, p + "post_attention_layernorm.weight"),
+            "qProj": find_tensor(manifest_tensors, p + "self_attn.q_proj.weight"),
+            "kProj": find_tensor(manifest_tensors, p + "self_attn.k_proj.weight"),
+            "vProj": find_tensor(manifest_tensors, p + "self_attn.v_proj.weight"),
+            "oProj": find_tensor(manifest_tensors, p + "self_attn.o_proj.weight"),
+            "gateProj": find_tensor(manifest_tensors, p + "mlp.gate_proj.weight"),
+            "upProj": find_tensor(manifest_tensors, p + "mlp.up_proj.weight"),
+            "downProj": find_tensor(manifest_tensors, p + "mlp.down_proj.weight"),
+        })
+
+    return {
+        "embedTokens": embed_tokens,
+        "layers": layers,
+        "finalNorm": final_norm,
+    }
+
+
 def decimal_encode(raw_bytes: bytes) -> str:
     """バイト列を固定長3桁の10進数文字列に変換する(数字のみ、文字を含まない)。
 
@@ -118,13 +159,17 @@ def export_weights(model, out_dir: str):
         with open(os.path.join(chunks_dir, f"chunk_{i:04d}.txt"), "w") as f:
             f.write(c)
 
+    num_layers = model.config.num_hidden_layers
+    structured = build_structured_weights(manifest_tensors, num_layers)
+
     manifest = {
-        "encoding": "decimal3",  # 1バイト = 固定長3桁の10進数文字列
+        "encoding": "decimal3",
         "chunk_size": CHUNK_SIZE,
         "num_chunks": len(chunks),
         "total_encoded_len": len(dec_str),
         "total_raw_bytes": len(full_bytes),
-        "tensors": manifest_tensors,
+        "tensors": manifest_tensors,       # フラット版(デバッグ・検算用に残す)
+        "modelWeights": structured,        # ModelWeights型にそのまま代入できる構造化版
     }
     with open(os.path.join(out_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)

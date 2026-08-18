@@ -1,3 +1,4 @@
+"use worldcode";
 /**
  * SimpleStories-1.25M (Llamaアーキテクチャ) の1トークン分forwardパス。
  * 重みは全て ByteCursor 経由で必要な範囲だけ遅延読み込みする。
@@ -14,7 +15,7 @@
  *   headDim=32, intermediateSize=341, vocabSize=4019, tieWordEmbeddings=true
  */
 
-import { TensorMeta } from "./types";
+import type { TensorMeta } from "./types";
 
 // ==== 型定義 ====
 
@@ -174,6 +175,7 @@ function* attention(
     qDim,
     hiddenSize,
   );
+  console.log("attention q end");
   const k = yield* linear(
     cursor,
     layerWeights.kProj,
@@ -181,6 +183,7 @@ function* attention(
     kvDim,
     hiddenSize,
   );
+  console.log("attention k end");
   const v = yield* linear(
     cursor,
     layerWeights.vProj,
@@ -188,7 +191,7 @@ function* attention(
     kvDim,
     hiddenSize,
   );
-
+  console.log("attention v end");
   // ヘッドごとにRoPEを適用
   for (let h = 0; h < numAttentionHeads; h++) {
     applyRope(
@@ -343,6 +346,8 @@ function* forwardStep(
   );
 
   for (let l = 0; l < cfg.numLayers; l++) {
+    yield;
+    console.log("layer", l);
     const layerWeights = weights.layers[l];
 
     const inputNormWeight = yield* readVectorDequantized(
@@ -359,7 +364,7 @@ function* forwardStep(
       cfg,
       kvCache,
     );
-
+    console.log("layer:", l, "attention end");
     const hiddenAfterAttn = new Float32Array(cfg.hiddenSize);
     for (let i = 0; i < cfg.hiddenSize; i++)
       hiddenAfterAttn[i] = hidden[i] + attnOut[i];
@@ -374,7 +379,8 @@ function* forwardStep(
       cfg.rmsNormEps,
     );
     const mlpOut = yield* mlp(cursor, layerWeights, normed2, cfg);
-
+    console.log("layer:", l, "mlp end");
+    yield;
     hidden = new Float32Array(cfg.hiddenSize);
     for (let i = 0; i < cfg.hiddenSize; i++)
       hidden[i] = hiddenAfterAttn[i] + mlpOut[i];
@@ -414,6 +420,7 @@ function* generate(
   promptTokenIds: number[],
   maxNewTokens: number,
   eosTokenId: number,
+  callback: (token: number[]) => void,
 ) {
   const kvCache: KVCache = {
     keys: Array.from({ length: cfg.numLayers }, () => []),
@@ -437,10 +444,11 @@ function* generate(
 
   // 新規トークンを1個ずつ生成
   for (let step = 0; step < maxNewTokens; step++) {
+    console.log("step:", step);
     const nextToken = argmax(logits);
     generated.push(nextToken);
+    callback(generated);
     if (nextToken === eosTokenId) break;
-
     const pos = generated.length - 1;
     logits = yield* forwardStep(cursor, weights, cfg, nextToken, pos, kvCache);
   }

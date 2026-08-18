@@ -1,3 +1,4 @@
+"use worldcode";
 import { readBlockData } from "./blockData";
 import { Manifest } from "./types";
 
@@ -40,7 +41,12 @@ export class ByteCursor {
         (this.chunkText.length - localPos) / 3,
       );
       const bytesToRead = Math.min(remaining, bytesLeftInChunk);
-
+      if (bytesToRead === 0) {
+        throw new Error(
+          `stalled read: chunk ${this.chunkIndex} exhausted at localPos=${localPos}, ` +
+            `remaining=${remaining}, srcOffset=${srcOffset}, chunkIndex:${this.chunkIndex}`,
+        );
+      }
       for (let i = 0; i < bytesToRead; i++) {
         const p = localPos + i * 3;
         out[outIdx++] =
