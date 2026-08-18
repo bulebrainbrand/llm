@@ -1,13 +1,20 @@
 """
 SimpleStories-1.25M の重みを int8 に量子化し、Bloxd.io の Code Block
-(1ブロックあたり16,000文字制限) に貼り付けられる形に Base64 チャンク分割して
+(1ブロックあたり16,000文字制限) に貼り付けられる形にチャンク分割して
 書き出すスクリプト。
+
+※Base64ではなく「固定長3桁の10進数」でエンコードしている。
+  Bloxdには伏せ字(NGワード)フィルタが存在し、Base64/Hexのアルファベット
+  (英字を含む)だと偶然NGワードの綴りが出現して保存時に文字が書き換わる
+  リスクがあるため。数字のみ(0-9)なら英単語を構成しようがなく安全。
+  トレードオフとしてサイズはBase64比で約1.7倍(3文字/バイト vs 1.33文字/バイト)
+  に膨らむが、ストレージ容量は問題にならない前提なので許容している。
 
 出力:
   out/manifest.json          -> 各テンソルの name/shape/scale/オフセット情報
   out/weights_chunks/chunk_0000.txt, chunk_0001.txt, ...
                               -> 量子化済み重み全体を1本のバイト列にして
-                                 Base64化し、16,000文字ごとに分割したもの
+                                 10進数(1バイト=3桁)化し、チャンク分割したもの
   out/tokenizer_vocab.json   -> トークンID -> 文字列 の対応表(そのままJS配列に変換可能)
 
 使い方:
@@ -16,20 +23,21 @@ SimpleStories-1.25M の重みを int8 に量子化し、Bloxd.io の Code Block
 
 manifest.jsonの中身:
   {
-    "chunk_size": 16000,
-    "num_chunks": 83,
-    "total_b64_len": 1327000,
+    "encoding": "decimal3",
+    "chunk_size": 15999,
+    "num_chunks": 125,
+    "total_encoded_len": 1990000,
     "tensors": [
       {"name": "model.embed_tokens.weight", "shape": [4096, 64], "scale": 0.00331, "offset": 0, "length": 262144},
       ...
     ]
   }
-  offset/length は「量子化後の生バイト列(int8)」内でのバイト位置。
-  Bloxd側でチャンクを連結してBase64デコードしたバイト列に対して、
-  このoffset/lengthでスライスすれば各テンソルの生データを取り出せる。
+  offset/length は「量子化後の生バイト列(int8)」内でのバイト位置(10進数化前)。
+  Bloxd側で全チャンクを文字列として連結し、3文字ずつ区切ってparseIntすれば
+  バイト値(0-255)の配列に戻る。そのバイト列に対してoffset/lengthでスライス
+  すれば各テンソルの生データを取り出せる。
 """
 
-import base64
 import json
 import os
 
@@ -39,7 +47,13 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 MODEL_NAME = "SimpleStories/SimpleStories-1.25M"
 OUT_DIR = "out"
-CHUNK_SIZE = 16000  # Bloxd Code Block 1つあたりの文字数上限
+# Bloxdの伏せ字フィルタ回避のため、Base64/Hexではなく固定長3桁の10進数で
+# 1バイトを表現する(例: 5 -> "005", 255 -> "255")。文字が数字のみになるため
+# 単語を構成しようがなくなる。
+BYTES_PER_CHAR_UNIT = 3
+# 16,000文字上限のうち、3の倍数に切り詰めてバイト境界がチャンクをまたがない
+# ようにする(1バイト分の桁が2つのチャンクに分割されるのを防ぐ)。
+CHUNK_SIZE = 16000 - (16000 % BYTES_PER_CHAR_UNIT)  # -> 15999
 
 
 def quantize_tensor_int8(tensor: torch.Tensor):
@@ -57,6 +71,17 @@ def quantize_tensor_int8(tensor: torch.Tensor):
 
 def chunk_string(s: str, chunk_size: int):
     return [s[i:i + chunk_size] for i in range(0, len(s), chunk_size)]
+
+
+def decimal_encode(raw_bytes: bytes) -> str:
+    """バイト列を固定長3桁の10進数文字列に変換する(数字のみ、文字を含まない)。
+
+    raw_bytesの各要素はPythonのbytesインデックスにより自動的に0-255の
+    符号なし整数として得られる(int8の2の補数表現がそのままバイトパターン
+    として保存されているため、符号付き/符号なしの変換は復元側でオフセット
+    を戻すだけでよい)。
+    """
+    return "".join(f"{b:03d}" for b in raw_bytes)
 
 
 def export_weights(model, out_dir: str):
@@ -84,8 +109,8 @@ def export_weights(model, out_dir: str):
         offset += length
 
     full_bytes = b"".join(raw_chunks)
-    b64_str = base64.b64encode(full_bytes).decode("ascii")
-    chunks = chunk_string(b64_str, CHUNK_SIZE)
+    dec_str = decimal_encode(full_bytes)
+    chunks = chunk_string(dec_str, CHUNK_SIZE)
 
     chunks_dir = os.path.join(out_dir, "weights_chunks")
     os.makedirs(chunks_dir, exist_ok=True)
@@ -94,18 +119,19 @@ def export_weights(model, out_dir: str):
             f.write(c)
 
     manifest = {
+        "encoding": "decimal3",  # 1バイト = 固定長3桁の10進数文字列
         "chunk_size": CHUNK_SIZE,
         "num_chunks": len(chunks),
-        "total_b64_len": len(b64_str),
+        "total_encoded_len": len(dec_str),
         "total_raw_bytes": len(full_bytes),
         "tensors": manifest_tensors,
     }
     with open(os.path.join(out_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
 
-    print(f"量子化後の生バイト数: {len(full_bytes):,} bytes")
-    print(f"Base64後の文字数:     {len(b64_str):,} chars")
-    print(f"チャンク数:            {len(chunks)} 個 (chunk_size={CHUNK_SIZE})")
+    print(f"量子化後の生バイト数:   {len(full_bytes):,} bytes")
+    print(f"10進数エンコード後の文字数: {len(dec_str):,} chars (3文字/バイト)")
+    print(f"チャンク数:              {len(chunks)} 個 (chunk_size={CHUNK_SIZE})")
     print(f"-> {chunks_dir}/ に書き出し完了")
     print(f"-> {os.path.join(out_dir, 'manifest.json')} に書き出し完了")
 

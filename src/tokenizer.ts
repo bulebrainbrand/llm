@@ -3,8 +3,8 @@
 import { readBlockData } from "./blockData";
 import { TOKENIZER_VOCAB_FIRST, TOKENIZER_VOCAB_SECOND } from "./positions";
 
-export const loadVocab = (): { map: Map<string, number>; array: string[] } => {
-  const firstBlockData = readBlockData(TOKENIZER_VOCAB_FIRST);
+export function* loadVocab() {
+  const firstBlockData = yield* readBlockData(TOKENIZER_VOCAB_FIRST);
   const firstArray: string[] = JSON.parse(firstBlockData).map((s: string) => {
     if (!s.startsWith("|")) return s;
     let result = "";
@@ -13,7 +13,7 @@ export const loadVocab = (): { map: Map<string, number>; array: string[] } => {
     }
     return result;
   });
-  const secondBlockData = readBlockData(TOKENIZER_VOCAB_SECOND);
+  const secondBlockData = yield* readBlockData(TOKENIZER_VOCAB_SECOND);
   const secondArray: string[] = JSON.parse(secondBlockData).map((s: string) => {
     if (!s.startsWith("|")) return s;
     let result = "";
@@ -30,7 +30,7 @@ export const loadVocab = (): { map: Map<string, number>; array: string[] } => {
     map.set(s, firstArray.length + i);
   }
   return { map, array: firstArray.concat(secondArray) };
-};
+}
 function isAsciiPunctuation(cp: number) {
   return (
     (cp >= 33 && cp <= 47) ||

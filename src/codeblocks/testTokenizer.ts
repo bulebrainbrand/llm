@@ -1,7 +1,8 @@
 "use codeblock{text_tokenizer}";
 
 import { decode, encode, loadVocab } from "../tokenizer";
-
-const { map, array } = loadVocab();
-encode;
-decode;
+(function* () {
+  const { map, array } = yield* loadVocab();
+  encode;
+  decode;
+})();
